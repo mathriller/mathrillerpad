@@ -1,4 +1,4 @@
-# 📌 MathrillerPad — 구글 시트 기반 사설 패들렛 허브
+# 📌 MathrillerPad — 구글 시트 기반 Mathriller 패드 허브
 
 패들렛(Padlet)을 대체하는 **완전 무료 · 무제한** 멀티 보드 웹 앱입니다.
 DB 는 구글 스프레드시트, 이미지 저장소는 구글 드라이브, 서버는 Google Apps Script(GAS)를 사용합니다.

@@ -2,7 +2,7 @@
   "name": "mathrillerpad",
   "private": true,
   "version": "1.0.0",
-  "description": "Google Sheets 기반 사설 패들렛(Padlet) 대체 멀티 보드 허브",
+  "description": "Google Sheets 기반 Mathriller 패드 멀티 보드 허브",
   "type": "module",
   "scripts": {
     "dev": "vite",

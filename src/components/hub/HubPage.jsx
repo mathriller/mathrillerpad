@@ -149,7 +149,7 @@ export default function HubPage({ navigate }) {
               <h1 className="text-lg font-extrabold leading-tight text-slate-800">MathrillerPad</h1>
               <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-bold text-indigo-700">관리자 센터</span>
             </div>
-            <p className="text-xs text-slate-500">구글 시트 기반 사설 패들렛 허브</p>
+            <p className="text-xs text-slate-500">구글 시트 기반 Mathriller 패드</p>
           </div>
           <button
             onClick={admin.logout}
