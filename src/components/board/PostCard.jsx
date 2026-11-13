@@ -40,6 +40,8 @@ function timeAgo(ts) {
  */
 export default function PostCard({
   post,
+  postIndex = 0,
+  totalPostsInSection = 1,
   sections = [],
   comments = [],
   isAdmin,
@@ -48,6 +50,7 @@ export default function PostCard({
   onEditRequest,
   onDeleteRequest,
   onMovePost,
+  onNudgePost,
   onDropOnPost,
   onAddComment,
   onDeleteComment,
@@ -81,6 +84,7 @@ export default function PostCard({
   };
 
   const handleDragStart = (e) => {
+    window.__draggedPostId = post.id;
     e.dataTransfer.setData('text/plain', post.id);
     e.dataTransfer.setData('application/json', JSON.stringify({ type: 'post', postId: post.id, sectionId: post.sectionId }));
     e.dataTransfer.effectAllowed = 'move';
@@ -111,7 +115,7 @@ export default function PostCard({
     const midY = rect.top + rect.height / 2;
     const pos = dragOverPosition || (e.clientY < midY ? 'top' : 'bottom');
     setDragOverPosition(null);
-    let draggedPostId = e.dataTransfer.getData('text/plain');
+    let draggedPostId = e.dataTransfer.getData('text/plain') || window.__draggedPostId;
     try {
       const raw = e.dataTransfer.getData('application/json');
       if (raw) {
@@ -127,6 +131,7 @@ export default function PostCard({
 
   return (
     <article
+      data-post-id={post.id}
       draggable
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
@@ -143,8 +148,33 @@ export default function PostCard({
       {dragOverPosition === 'bottom' && (
         <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-30 h-1.5 bg-indigo-600 shadow-md animate-pulse" />
       )}
-      {/* 카드 상단 제어 바 (수정 / 삭제 / 섹션 이동) */}
+
+      {/* 카드 상단 제어 바 (위/아래 순서 / 수정 / 삭제 / 섹션 이동) */}
       <div className="absolute right-2 top-2 z-10 flex items-center gap-1 opacity-90 sm:opacity-0 group-hover:opacity-100 transition">
+        {/* 카드 위/아래 순서 조정 버튼 (관리자 또는 암호 설정된 메모) */}
+        {(isAdmin || post.hasPassword) && totalPostsInSection > 1 && (
+          <div className="flex items-center rounded-lg bg-white/90 shadow divide-x divide-slate-100 overflow-hidden">
+            <button
+              type="button"
+              disabled={postIndex === 0}
+              onClick={(e) => { e.stopPropagation(); onNudgePost?.(post, 'up'); }}
+              title="메모를 위로 한 칸 이동"
+              className="flex h-7 w-6 items-center justify-center text-[10px] font-bold text-slate-600 hover:text-indigo-600 hover:bg-slate-50 disabled:opacity-25"
+            >
+              ▲
+            </button>
+            <button
+              type="button"
+              disabled={postIndex === totalPostsInSection - 1}
+              onClick={(e) => { e.stopPropagation(); onNudgePost?.(post, 'down'); }}
+              title="메모를 아래로 한 칸 이동"
+              className="flex h-7 w-6 items-center justify-center text-[10px] font-bold text-slate-600 hover:text-indigo-600 hover:bg-slate-50 disabled:opacity-25"
+            >
+              ▼
+            </button>
+          </div>
+        )}
+
         {/* 섹션 이동 메뉴 버튼 */}
         {sections.length > 1 && (
           <div className="relative">

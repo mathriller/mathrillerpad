@@ -318,6 +318,22 @@ export default function BoardPage({ boardId, navigate }) {
     handleMovePost(draggedPostId, targetSectionId, insertIdx, orderedPostIds);
   };
 
+  // 메모 위(▲)/아래(▼) 한 칸 이동 버튼 핸들러
+  const handleNudgePost = (post, direction) => {
+    const list = [...(postsBySection[String(post.sectionId)] || [])];
+    const idx = list.findIndex((p) => String(p.id) === String(post.id));
+    if (idx === -1) return;
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= list.length) return;
+
+    const temp = list[idx];
+    list[idx] = list[targetIdx];
+    list[targetIdx] = temp;
+
+    const orderedPostIds = list.map((p) => p.id);
+    handleMovePost(post.id, post.sectionId, targetIdx, orderedPostIds);
+  };
+
   // 섹션 빈 공간에 메모를 떨어뜨렸을 때 (맨 아래 추가)
   const handleDropPostOnSection = (draggedPostId, targetSectionId) => {
     const draggedPost = data?.posts?.find((p) => String(p.id) === String(draggedPostId));
@@ -587,6 +603,7 @@ export default function BoardPage({ boardId, navigate }) {
             onEditRequest={handleEditRequest}
             onDeleteRequest={handleDeleteRequest}
             onMovePost={handleMovePost}
+            onNudgePost={handleNudgePost}
             onDropPostOnPost={handleDropPostOnPost}
             onDropPostOnSection={handleDropPostOnSection}
             onDropSection={handleDropSection}

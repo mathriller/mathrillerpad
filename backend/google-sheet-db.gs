@@ -311,18 +311,26 @@ function movePost_(p) {
     var lastRow = sh.getLastRow();
     if (lastRow >= 2) {
       var lastCol = Math.max(1, sh.getLastColumn());
-      var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(str_);
+      var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(function (c) { return str_(c).trim(); });
       var orderColIdx = headers.indexOf('order');
+      if (orderColIdx === -1) {
+        orderColIdx = headers.length;
+        headers.push('order');
+        sh.getRange(1, orderColIdx + 1).setValue('order').setFontWeight('bold').setBackground('#e8eaf6');
+      }
       var idColIdx = headers.indexOf('id');
       if (orderColIdx !== -1 && idColIdx !== -1) {
         var idValues = sh.getRange(2, idColIdx + 1, lastRow - 1, 1).getValues();
         var orderMap = {};
-        p.orderedPostIds.forEach(function (id, idx) { orderMap[String(id)] = idx; });
+        p.orderedPostIds.forEach(function (id, idx) {
+          var cleanId = str_(id).trim().replace(/^'/, '');
+          orderMap[cleanId] = idx;
+        });
         var orderRange = sh.getRange(2, orderColIdx + 1, lastRow - 1, 1);
         var currentOrders = orderRange.getValues();
         var changed = false;
         for (var i = 0; i < idValues.length; i++) {
-          var rowId = str_(idValues[i][0]);
+          var rowId = str_(idValues[i][0]).trim().replace(/^'/, '');
           if (orderMap.hasOwnProperty(rowId)) {
             currentOrders[i][0] = orderMap[rowId];
             changed = true;
@@ -562,7 +570,8 @@ function saveBlobImage_(blob, prefix) {
 
 // ───────────────────────── 관리자 인증 ─────────────────────────
 function getMasterPassword_() {
-  var v = PropertiesService.getScriptProperties().getProperty('ADMIN_PASSWORD');
+  var props = PropertiesService.getScriptProperties();
+  var v = props.getProperty('ADMIN_PASSWORD') || props.getProperty('MASTER_PASSWORD');
   return v ? String(v) : DEFAULT_ADMIN_PASSWORD;
 }
 

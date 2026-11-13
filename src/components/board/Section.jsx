@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import PostCard from './PostCard';
 
 /**
  * 선반(Shelf) 한 열
  *  - 섹션 이름 수정 (인라인 폼)
- *  - 섹션 좌우 순서 이동 (← / →)
+ *  - 섹션 좌우 순서 이동 (← / → 및 드래그 ⠿)
  *  - 카드 드래그 앤 드롭 수신 영역 (onDrop)
  */
 export default function Section({
@@ -25,6 +25,7 @@ export default function Section({
   onEditRequest,
   onDeleteRequest,
   onMovePost,
+  onNudgePost,
   onDropPostOnPost,
   onDropPostOnSection,
   onDropSection,
@@ -33,6 +34,7 @@ export default function Section({
   onImageClick,
   onRequireAdmin,
 }) {
+  const cardsContainerRef = useRef(null);
   const [editing, setEditing] = useState(false);
   const [titleInput, setTitleInput] = useState(section.title);
   const [isPostDragOver, setIsPostDragOver] = useState(false);
@@ -92,9 +94,33 @@ export default function Section({
       return;
     }
 
-    // 2) 메모 드래그 앤 드롭 (카드 위에 직접 떨어지지 않고 섹션 빈 공간에 떨어진 경우 맨 아래 추가)
-    const postId = dataObj?.postId || e.dataTransfer.getData('text/plain');
+    // 2) 메모 드래그 앤 드롭
+    const postId = dataObj?.postId || e.dataTransfer.getData('text/plain') || window.__draggedPostId;
     if (postId) {
+      // 카드가 여러 개 있는 경우 마우스 커서 Y좌표와 가장 가까운 카드를 찾아 위/아래 삽입
+      const cardEls = cardsContainerRef.current?.querySelectorAll('[data-post-id]');
+      if (cardEls && cardEls.length > 0) {
+        let closestPostId = null;
+        let placeAbove = false;
+        let minDist = Infinity;
+        cardEls.forEach((el) => {
+          const rect = el.getBoundingClientRect();
+          const midY = rect.top + rect.height / 2;
+          const dist = Math.abs(e.clientY - midY);
+          if (dist < minDist) {
+            minDist = dist;
+            closestPostId = el.getAttribute('data-post-id');
+            placeAbove = e.clientY < midY;
+          }
+        });
+        if (closestPostId && String(closestPostId) !== String(postId)) {
+          const targetPost = posts.find((p) => String(p.id) === String(closestPostId));
+          if (targetPost) {
+            onDropPostOnPost?.(postId, targetPost, placeAbove ? 'top' : 'bottom');
+            return;
+          }
+        }
+      }
       onDropPostOnSection?.(postId, section.id);
     }
   };
@@ -211,16 +237,18 @@ export default function Section({
       </header>
 
       {/* 카드 목록 영역 */}
-      <div className="col-scroll flex-1 space-y-3 overflow-y-auto px-3 pb-2 min-h-24">
+      <div ref={cardsContainerRef} className="col-scroll flex-1 space-y-3 overflow-y-auto px-3 pb-2 min-h-24">
         {posts.length === 0 && (
           <div className="py-8 text-center text-xs text-slate-500/80 border-2 border-dashed border-white/40 rounded-xl my-2">
             메모를 추가하거나 끌어다 놓으세요
           </div>
         )}
-        {posts.map((p) => (
+        {posts.map((p, pIdx) => (
           <PostCard
             key={p.id}
             post={p}
+            postIndex={pIdx}
+            totalPostsInSection={posts.length}
             sections={sections}
             comments={commentsByPost[p.id] || []}
             isAdmin={isAdmin}
@@ -229,6 +257,7 @@ export default function Section({
             onEditRequest={onEditRequest}
             onDeleteRequest={onDeleteRequest}
             onMovePost={onMovePost}
+            onNudgePost={onNudgePost}
             onDropOnPost={onDropPostOnPost}
             onAddComment={onAddComment}
             onDeleteComment={onDeleteComment}
