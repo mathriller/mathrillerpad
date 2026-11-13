@@ -107,7 +107,9 @@ export default function PostCard({
   const handleDrop = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const pos = dragOverPosition || 'bottom';
+    const rect = e.currentTarget.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const pos = dragOverPosition || (e.clientY < midY ? 'top' : 'bottom');
     setDragOverPosition(null);
     let draggedPostId = e.dataTransfer.getData('text/plain');
     try {

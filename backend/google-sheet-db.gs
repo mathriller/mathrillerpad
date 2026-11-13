@@ -305,16 +305,34 @@ function movePost_(p) {
   updateCell_('Posts', row._row, 'sectionId', targetSectionId);
   updateCell_('Posts', row._row, 'order', newOrder);
 
-  // 같은 섹션 내 순서 재정렬이 주어진 경우
-  if (Array.isArray(p.orderedPostIds)) {
-    var posts = readTable_('Posts').filter(function (x) { return x.boardId === p.boardId && x.sectionId === targetSectionId && notDeleted_(x); });
-    var byId = {};
-    posts.forEach(function (x) { byId[x.id] = x; });
-    p.orderedPostIds.forEach(function (id, idx) {
-      if (byId[id]) {
-        updateCell_('Posts', byId[id]._row, 'order', idx);
+  // 같은 섹션 내 순서 재정렬이 주어진 경우 (단 1회의 일괄 setValues 쓰기로 초고속 처리)
+  if (Array.isArray(p.orderedPostIds) && p.orderedPostIds.length > 0) {
+    var sh = sheet_('Posts');
+    var lastRow = sh.getLastRow();
+    if (lastRow >= 2) {
+      var lastCol = Math.max(1, sh.getLastColumn());
+      var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(str_);
+      var orderColIdx = headers.indexOf('order');
+      var idColIdx = headers.indexOf('id');
+      if (orderColIdx !== -1 && idColIdx !== -1) {
+        var idValues = sh.getRange(2, idColIdx + 1, lastRow - 1, 1).getValues();
+        var orderMap = {};
+        p.orderedPostIds.forEach(function (id, idx) { orderMap[String(id)] = idx; });
+        var orderRange = sh.getRange(2, orderColIdx + 1, lastRow - 1, 1);
+        var currentOrders = orderRange.getValues();
+        var changed = false;
+        for (var i = 0; i < idValues.length; i++) {
+          var rowId = str_(idValues[i][0]);
+          if (orderMap.hasOwnProperty(rowId)) {
+            currentOrders[i][0] = orderMap[rowId];
+            changed = true;
+          }
+        }
+        if (changed) {
+          orderRange.setValues(currentOrders);
+        }
       }
-    });
+    }
   }
 
   return { postId: p.postId, sectionId: targetSectionId, order: newOrder };

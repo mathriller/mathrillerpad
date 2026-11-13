@@ -94,7 +94,13 @@ export default function BoardPage({ boardId, navigate }) {
 
   const postsBySection = useMemo(() => {
     const m = {};
-    data?.posts?.forEach((p) => {
+    const sorted = [...(data?.posts || [])].sort((a, b) => {
+      const ordA = a.order !== undefined && a.order !== '' ? Number(a.order) : 999999;
+      const ordB = b.order !== undefined && b.order !== '' ? Number(b.order) : 999999;
+      if (ordA !== ordB) return ordA - ordB;
+      return (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0);
+    });
+    sorted.forEach((p) => {
       const sId = String(p.sectionId);
       (m[sId] ||= []).push(p);
     });
@@ -215,21 +221,20 @@ export default function BoardPage({ boardId, navigate }) {
     const backup = data;
 
     setData((d) => {
+      const orderMap = {};
+      if (Array.isArray(orderedPostIds)) {
+        orderedPostIds.forEach((id, idx) => {
+          orderMap[String(id)] = idx;
+        });
+      }
       const updatedPosts = d.posts.map((p) => {
-        if (String(p.id) === String(postId)) {
-          return {
-            ...p,
-            sectionId: targetSectionId,
-            order: typeof newOrder === 'number' ? newOrder : p.order,
-          };
-        }
-        if (Array.isArray(orderedPostIds)) {
-          const idx = orderedPostIds.indexOf(p.id);
-          if (idx !== -1) {
-            return { ...p, order: idx };
-          }
-        }
-        return p;
+        const isMovedPost = String(p.id) === String(postId);
+        const mappedOrder = orderMap[String(p.id)];
+        return {
+          ...p,
+          sectionId: isMovedPost ? targetSectionId : p.sectionId,
+          order: mappedOrder !== undefined ? mappedOrder : (isMovedPost && typeof newOrder === 'number' ? newOrder : p.order),
+        };
       });
       return { ...d, posts: updatedPosts };
     });
@@ -299,11 +304,12 @@ export default function BoardPage({ boardId, navigate }) {
     if (!draggedPost) return;
 
     const targetSectionId = targetPost.sectionId;
-    const currentList = (postsBySection[String(targetSectionId)] || []).filter(
+    const currentList = [...(postsBySection[String(targetSectionId)] || [])].filter(
       (p) => String(p.id) !== String(draggedPostId),
     );
     const targetIdx = currentList.findIndex((p) => String(p.id) === String(targetPost.id));
-    const insertIdx = dropPosition === 'top' ? Math.max(0, targetIdx) : targetIdx + 1;
+    if (targetIdx === -1) return;
+    const insertIdx = dropPosition === 'top' ? targetIdx : targetIdx + 1;
 
     const newOrderedList = [...currentList];
     newOrderedList.splice(insertIdx, 0, draggedPost);
