@@ -79,14 +79,20 @@ export default function CsvImportModal({ open, onClose, boardId, masterPassword,
       return;
     }
 
-    // 2) 게시물 배치 전송 (이미지 다운로드 및 섹션/메모 저장)
+    // 2) 게시물 배치 전송 (이미지 다운로드 및 섹션/메모/댓글 저장)
     const acc = { done: 0, total: posts.length, image: 0, link: 0, text: 0, failed: 0 };
     setProgress({ ...acc });
+    const allComments = parsed.comments || [];
+
     for (let i = 0; i < posts.length; i += IMPORT_BATCH_SIZE) {
       if (cancelRef.current) break;
       const batch = posts.slice(i, i + IMPORT_BATCH_SIZE);
+      const batchComments = allComments
+        .filter((c) => c.postIndex >= i && c.postIndex < i + batch.length)
+        .map((c) => ({ ...c, postIndex: c.postIndex - i }));
+
       try {
-        const res = await api.importPosts({ boardId: activeBoardId, posts: batch });
+        const res = await api.importPosts({ boardId: activeBoardId, posts: batch, comments: batchComments });
         res.results.forEach((r) => { acc[r.status] = (acc[r.status] || 0) + 1; });
       } catch (err) {
         acc.failed += batch.length;
@@ -99,6 +105,7 @@ export default function CsvImportModal({ open, onClose, boardId, masterPassword,
   };
 
   const withAttachment = parsed?.posts.filter((p) => p.attachmentUrl).length ?? 0;
+  const totalComments = parsed?.comments?.length ?? 0;
   const sectionNames = parsed ? [...new Set(parsed.posts.map((p) => p.sectionTitle || '가져온 게시물'))] : [];
   const pct = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
 
@@ -157,9 +164,10 @@ export default function CsvImportModal({ open, onClose, boardId, masterPassword,
             )}
           </div>
 
-          <div className="grid grid-cols-3 gap-2 text-center">
+          <div className="grid grid-cols-4 gap-2 text-center">
             <Stat label="게시물" value={parsed.posts.length} />
-            <Stat label="첨부 이미지 URL" value={withAttachment} />
+            <Stat label="첨부 이미지" value={withAttachment} />
+            <Stat label="댓글" value={totalComments} />
             <Stat label="분리된 섹션" value={sectionNames.length} />
           </div>
 

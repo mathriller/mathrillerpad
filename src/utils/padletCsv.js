@@ -11,6 +11,7 @@ const FIELD_ALIASES = {
   attachmentUrl: ['첨부 링크', '첨부', '첨부 파일', '첨부파일', 'attachment', 'attachment url', 'link', 'url', '링크', '파일'],
   author: ['저자', '작성자', 'author', 'creator', '이름', 'name'],
   createdAt: ['만든 시간', '생성', 'created at', 'created', 'date', 'timestamp', '작성일', '날짜', '게시 일시', '등록일'],
+  emoji: ['이모지', 'emoji', '반응', 'reaction'],
 };
 
 /** 패들렛에서 빈 칸에 들어가는 '데이터 없음' 등의 무의미한 텍스트 필터링 */
@@ -47,7 +48,7 @@ function matchHeaders(headers) {
   return map;
 }
 
-/** 파일명에서 패들렛 보드 제목 추론 (예: "Padlet - 2024 과학영재원.xlsx" -> "2024 과학영재원") */
+/** 파일명에서 패들렛 보드 제목 추론 */
 function titleFromFileName(name = '') {
   return name
     .replace(/\.(xlsx|xls|csv)$/i, '')
@@ -55,7 +56,16 @@ function titleFromFileName(name = '') {
     .trim();
 }
 
-/** 파일을 2D 배열 및 메타데이터로 변환 */
+/** 이모지/하트 텍스트(예: "❤️ (3)")에서 숫자 추출 */
+function parseLikes(emojiText) {
+  const s = String(emojiText || '');
+  const m = s.match(/\((\d+)\)/);
+  if (m) return parseInt(m[1], 10);
+  if (s.includes('❤️') || s.includes('❤')) return 1;
+  return 0;
+}
+
+/** 파일을 2D 배열 및 메타데이터, 댓글 배열로 변환 */
 async function fileToData(file) {
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
@@ -67,7 +77,6 @@ async function fileToData(file) {
   if (isExcel) {
     try {
       const workbook = XLSX.read(buffer, { type: 'array' });
-      // 게시물 시트 찾기 (이름이 '게시물', 'Posts', 또는 첫 번째 시트)
       const postSheetName = workbook.SheetNames.find((n) => /게시물|post/i.test(n)) || workbook.SheetNames[0];
       const sheet = workbook.Sheets[postSheetName];
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
@@ -87,7 +96,27 @@ async function fileToData(file) {
         });
       }
 
-      return { rows: rows || [], meta: { boardTitle, boardUrl } };
+      // 댓글 시트에서 댓글 데이터 추출
+      const rawComments = [];
+      const commentSheetName = workbook.SheetNames.find((n) => /댓글|comment/i.test(n));
+      if (commentSheetName) {
+        const comSheet = workbook.Sheets[commentSheetName];
+        const comRows = XLSX.utils.sheet_to_json(comSheet, { header: 1, defval: '' });
+        // 첫 행은 헤더 ['게시물 번호', '이름', '댓글']
+        for (let i = 1; i < comRows.length; i++) {
+          const r = comRows[i];
+          if (r && r.length >= 3) {
+            const postNum = parseInt(r[0], 10);
+            const author = clean(r[1]) || '익명';
+            const content = clean(r[2]);
+            if (!isNaN(postNum) && content) {
+              rawComments.push({ postNum, author, content });
+            }
+          }
+        }
+      }
+
+      return { rows: rows || [], meta: { boardTitle, boardUrl }, rawComments };
     } catch {
       // 엑셀 파싱 실패 시 폴백
     }
@@ -104,16 +133,43 @@ async function fileToData(file) {
         const rows = data || [];
         let boardTitle = '';
         let boardUrl = '';
-        // CSV 하단의 '제목,xxx', '링크,xxx' 행 스캔
-        rows.forEach((r) => {
-          if (r && r.length >= 2) {
-            const k = String(r[0] || '').trim();
-            const v = String(r[1] || '').trim();
-            if (k === '제목' || /title|subject/i.test(k)) boardTitle = v;
-            if (k === '링크' || /url|link/i.test(k)) boardUrl = v;
+        const rawComments = [];
+
+        let currentSection = 'posts'; // 'posts' | 'comments' | 'reactions' | 'summary'
+
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
+          if (!r || !r.length) continue;
+          const firstCol = String(r[0] || '').trim();
+
+          if (firstCol === '게시물 번호' && r.join(',').includes('댓글')) {
+            currentSection = 'comments';
+            continue;
           }
-        });
-        resolve({ rows, meta: { boardTitle, boardUrl } });
+          if (firstCol === '게시물 번호' && r.join(',').includes('이모지')) {
+            currentSection = 'reactions';
+            continue;
+          }
+          if (firstCol === '제목' && r.length >= 2) {
+            boardTitle = String(r[1] || '').trim();
+            continue;
+          }
+          if (firstCol === '링크' && r.length >= 2) {
+            boardUrl = String(r[1] || '').trim();
+            continue;
+          }
+
+          if (currentSection === 'comments' && r.length >= 3) {
+            const postNum = parseInt(firstCol, 10);
+            const author = clean(r[1]) || '익명';
+            const content = clean(r[2]);
+            if (!isNaN(postNum) && content) {
+              rawComments.push({ postNum, author, content });
+            }
+          }
+        }
+
+        resolve({ rows, meta: { boardTitle, boardUrl }, rawComments });
       },
       error: (err) => reject(new Error(`CSV 파싱 실패: ${err.message}`)),
     });
@@ -122,13 +178,13 @@ async function fileToData(file) {
 
 /**
  * 패들렛 내보내기 파일 파서 (CSV / XLSX 지원)
- * @returns {Promise<{ posts: Array, headers: string[], mapping: object, boardTitle: string, boardUrl: string }>}
+ * @returns {Promise<{ posts: Array, comments: Array, headers: string[], mapping: object, boardTitle: string, boardUrl: string }>}
  */
 export async function parsePadletCsv(file) {
-  const { rows: allRows, meta } = await fileToData(file);
+  const { rows: allRows, meta, rawComments = [] } = await fileToData(file);
   if (!allRows.length) throw new Error('파일이 비어 있습니다.');
 
-  // 헤더 행 찾기 (첫 번째 비어있지 않은 행)
+  // 헤더 행 찾기
   let headerRowIdx = -1;
   for (let i = 0; i < allRows.length; i++) {
     const r = allRows[i];
@@ -142,12 +198,11 @@ export async function parsePadletCsv(file) {
   const headers = allRows[headerRowIdx].map((h) => String(h || '').trim());
   const headerStr = headers.join(',').toLowerCase();
 
-  // ⚠️ 오직 '이모지 반응'만 단독으로 들어있는 파일 감지
   if (headerStr.includes('이모지') && !headerStr.includes('섹션') && !headerStr.includes('본문') && !headerStr.includes('첨부')) {
     throw new Error(
       "선택하신 파일은 패들렛의 '이모지 반응' 백업 파일입니다.\n\n" +
       "게시물 본문과 사진을 가져오려면 패들렛 보드에서:\n" +
-      "[공유] → [내보내기] → 'CSV로 내보내기' (또는 '스프레드시트로 내보내기')를 선택해 다운로드한 원본 파일을 올려주세요."
+      "[공유] → [내보내기] → '스프레드시트로 내보내기' 또는 'CSV로 내보내기'를 선택해 다운로드한 원본 파일을 올려주세요."
     );
   }
 
@@ -156,14 +211,15 @@ export async function parsePadletCsv(file) {
     throw new Error(
       "패들렛 게시물 형식을 인식할 수 없습니다.\n" +
       "(인식된 컬럼: " + headers.filter(Boolean).join(', ') + ")\n\n" +
-      "패들렛 [공유] → [내보내기] 메뉴에서 'CSV로 내보내기' 또는 '스프레드시트로 내보내기'로 저장한 원본 파일을 올려주세요."
+      "패들렛 [공유] → [내보내기] 메뉴에서 '스프레드시트로 내보내기' 또는 'CSV로 내보내기'로 저장한 원본 파일을 올려주세요."
     );
   }
 
   const get = (row, f) => (mapping[f] !== undefined ? clean(row[mapping[f]]) : '');
 
-  // 게시물 행 추출: 패들렛 복합 파일에서 게시물 테이블이 끝나고 댓글/이모지 테이블이 나오면 중단
   const posts = [];
+  const postNumToIndexMap = {}; // '게시물 번호' -> posts 배열 인덱스
+
   for (let i = headerRowIdx + 1; i < allRows.length; i++) {
     const row = allRows[i];
     if (!row || !row.length) continue;
@@ -183,8 +239,15 @@ export async function parsePadletCsv(file) {
     const author = clean(get(row, 'author')) || '익명';
     const createdAt = clean(get(row, 'createdAt'));
     const sectionTitle = clean(get(row, 'sectionTitle')) || '가져온 게시물';
+    const likes = parseLikes(get(row, 'emoji'));
+
+    const postNum = parseInt(firstCol, 10);
 
     if (title || content || attachmentUrl) {
+      const idx = posts.length;
+      if (!isNaN(postNum)) {
+        postNumToIndexMap[postNum] = idx;
+      }
       posts.push({
         title,
         content,
@@ -192,6 +255,7 @@ export async function parsePadletCsv(file) {
         author,
         createdAt,
         sectionTitle,
+        likes,
       });
     }
   }
@@ -200,11 +264,24 @@ export async function parsePadletCsv(file) {
     throw new Error('파일에서 가져올 수 있는 게시물 데이터를 찾지 못했습니다.');
   }
 
-  // 보드 제목: 파일 내 메타데이터 제목 -> 파일명 -> 기본값
+  // 댓글 데이터 정제 및 postIndex 연결
+  const comments = [];
+  rawComments.forEach((c) => {
+    const postIdx = postNumToIndexMap[c.postNum];
+    if (postIdx !== undefined) {
+      comments.push({
+        postIndex: postIdx,
+        author: c.author,
+        content: c.content,
+      });
+    }
+  });
+
   const finalBoardTitle = meta.boardTitle || titleFromFileName(file.name) || '가져온 패들렛 보드';
 
   return {
     posts,
+    comments,
     headers,
     mapping,
     boardTitle: finalBoardTitle,

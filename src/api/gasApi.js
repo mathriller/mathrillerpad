@@ -39,10 +39,22 @@ export const gasApi = {
   getBoard: (boardId) => gasGet('getBoard', { boardId }),
   createBoard: (p) => gasPost('createBoard', p),
   deleteBoard: (p) => gasPost('deleteBoard', p),
+
   createSection: (p) => gasPost('createSection', p),
+  updateSection: (p) => gasPost('updateSection', p),
+  reorderSections: (p) => gasPost('reorderSections', p),
   deleteSection: (p) => gasPost('deleteSection', p),
+
   createPost: (p) => gasPost('createPost', p),
+  updatePost: (p) => gasPost('updatePost', p),
+  movePost: (p) => gasPost('movePost', p),
+  likePost: (p) => gasPost('likePost', p),
   deletePost: (p) => gasPost('deletePost', p),
+
+  createComment: (p) => gasPost('createComment', p),
+  deleteComment: (p) => gasPost('deleteComment', p),
+
   importPosts: (p) => gasPost('importPosts', p),
   verifyAdmin: (p) => gasPost('verifyAdmin', p),
+  verifyPostPassword: (p) => gasPost('verifyPostPassword', p),
 };

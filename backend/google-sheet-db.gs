@@ -3,30 +3,15 @@
  *  MathrillerPad — Google Sheets DB 백엔드 (Google Apps Script)
  * ════════════════════════════════════════════════════════════════════
  *
- *  [설치 방법]
- *   1. 새 구글 스프레드시트를 만들고  확장 프로그램 → Apps Script 를 엽니다.
- *   2. 기본 Code.gs 내용을 모두 지우고 이 파일 전체를 붙여넣고 저장합니다.
- *   3. 상단 함수 선택 드롭다운에서  setup  을 선택 후 ▶ 실행
- *      → 권한 승인(스프레드시트 / 드라이브 / 외부 URL 접근) 후
- *        Boards, Sections, Posts 3개 탭과 이미지 저장용 드라이브 폴더가 자동 생성됩니다.
- *   4. 배포 → 새 배포 → 유형: "웹 앱"
- *        - 다음 사용자 인증 정보로 실행: "나"
- *        - 액세스 권한이 있는 사용자: "모든 사용자"
- *      → 발급된 웹 앱 URL(…/exec)을 프론트엔드 .env 의 VITE_GAS_URL 에 넣습니다.
- *   5. 코드를 수정했다면  배포 → 배포 관리 → 편집(연필) → 버전: "새 버전"  으로 재배포해야 반영됩니다.
- *
- *  [관리자 비밀번호 변경]
- *   - 가장 간단한 방법: 아래 DEFAULT_ADMIN_PASSWORD 값을 수정 후 재배포
- *   - 권장 방법(코드 노출 X): 프로젝트 설정(⚙) → 스크립트 속성 → ADMIN_PASSWORD 추가
- *     (스크립트 속성이 존재하면 코드의 기본값보다 우선합니다)
- *
- *  [DB 구조]
- *   Boards   : id | title | description | adminHash | createdAt | deleted
- *   Sections : id | boardId | title | order | createdAt | deleted
- *   Posts    : id | boardId | sectionId | title | author | content | imageUrl
- *              | imageKind | sourceUrl | linkUrl | createdAt | deleted
- *   - 삭제는 deleted 플래그(TRUE) 방식의 "소프트 삭제"입니다. (실수로 지워도 시트에서 복구 가능)
- *   - 이미지는 셀 용량 제한(5만 자) 때문에 구글 드라이브 폴더에 파일로 저장하고 URL만 시트에 기록합니다.
+ *  [기능 목록]
+ *   1. 멀티 보드 / 섹션 선반 / 메모 CRUD
+ *   2. 섹션 이름 수정 & 섹션 좌우 순서 이동
+ *   3. 메모 섹션 간 이동 및 상하 순서 이동
+ *   4. 작성자 암호 설정을 통한 메모 직접 수정 / 삭제
+ *   5. 하트 좋아요 (Like) 토글
+ *   6. 메모별 댓글 (Comments) 등록 및 관리
+ *   7. 패들렛 엑셀/CSV 영구 마이그레이션 (사진 드라이브 저장 + 댓글 + 반응)
+ *   8. 마스터/보드 관리자 권한 인증
  * ════════════════════════════════════════════════════════════════════
  */
 
@@ -44,7 +29,8 @@ var SCHEMA = {
   Boards: ['id', 'title', 'description', 'adminHash', 'createdAt', 'deleted'],
   Sections: ['id', 'boardId', 'title', 'order', 'createdAt', 'deleted'],
   Posts: ['id', 'boardId', 'sectionId', 'title', 'author', 'content', 'imageUrl',
-          'imageKind', 'sourceUrl', 'linkUrl', 'createdAt', 'deleted'],
+          'imageKind', 'sourceUrl', 'linkUrl', 'order', 'passwordHash', 'likes', 'createdAt', 'deleted'],
+  Comments: ['id', 'postId', 'boardId', 'author', 'content', 'createdAt', 'deleted'],
 };
 
 // ───────────────────────── 진입점 ─────────────────────────
@@ -66,7 +52,6 @@ function doPost(e) {
 function setup() {
   ensureSheets_();
   getImageFolder_();
-  // 외부 URL 권한 승인을 위해 한 번 호출
   try { UrlFetchApp.fetch('https://www.google.com', { muteHttpExceptions: true }); } catch (e) {}
   Logger.log('✅ 설정 완료! 이제 "웹 앱"으로 배포하세요.');
 }
@@ -85,17 +70,30 @@ function handle_(p) {
     }
     var data;
     switch (action) {
-      case 'ping':          data = { pong: true, time: Date.now() }; break;
-      case 'listBoards':    data = listBoards_(); break;
-      case 'getBoard':      data = getBoard_(p.boardId); break;
-      case 'createBoard':   data = createBoard_(p); break;
-      case 'createSection': data = createSection_(p); break;
-      case 'createPost':    data = createPost_(p); break;
-      case 'importPosts':   data = importPosts_(p); break;
-      case 'verifyAdmin':   data = { valid: isAdmin_(p.boardId, p.password) }; break;
-      case 'deletePost':    data = deletePost_(p); break;
-      case 'deleteSection': data = deleteSection_(p); break;
-      case 'deleteBoard':   data = deleteBoard_(p); break;
+      case 'ping':             data = { pong: true, time: Date.now() }; break;
+      case 'listBoards':       data = listBoards_(); break;
+      case 'getBoard':         data = getBoard_(p.boardId); break;
+      case 'createBoard':      data = createBoard_(p); break;
+      case 'deleteBoard':      data = deleteBoard_(p); break;
+
+      case 'createSection':    data = createSection_(p); break;
+      case 'updateSection':    data = updateSection_(p); break;
+      case 'reorderSections':  data = reorderSections_(p); break;
+      case 'deleteSection':    data = deleteSection_(p); break;
+
+      case 'createPost':       data = createPost_(p); break;
+      case 'updatePost':       data = updatePost_(p); break;
+      case 'movePost':         data = movePost_(p); break;
+      case 'likePost':         data = likePost_(p); break;
+      case 'deletePost':       data = deletePost_(p); break;
+
+      case 'createComment':    data = createComment_(p); break;
+      case 'deleteComment':    data = deleteComment_(p); break;
+
+      case 'importPosts':      data = importPosts_(p); break;
+      case 'verifyAdmin':      data = { valid: isAdmin_(p.boardId, p.password) }; break;
+      case 'verifyPostPassword': data = { valid: verifyPostPassword_(p.postId, p.password) }; break;
+
       default: throw new Error('알 수 없는 action: ' + action);
     }
     return json_({ ok: true, data: data });
@@ -125,19 +123,28 @@ function getBoard_(boardId) {
   if (!boardId) throw new Error('boardId가 필요합니다.');
   var board = findBoard_(boardId);
   if (!board) throw new Error('존재하지 않거나 삭제된 보드입니다.');
+
   var sections = readTable_('Sections')
     .filter(function (s) { return s.boardId === boardId && notDeleted_(s); })
     .sort(function (a, b) { return (a.order - b.order) || (a.createdAt - b.createdAt); });
+
   var posts = readTable_('Posts')
     .filter(function (x) { return x.boardId === boardId && notDeleted_(x); })
-    .sort(function (a, b) { return a.createdAt - b.createdAt; })
+    .sort(function (a, b) { return (a.order - b.order) || (a.createdAt - b.createdAt); })
     .map(publicPost_);
+
+  var comments = readTable_('Comments')
+    .filter(function (c) { return c.boardId === boardId && notDeleted_(c); })
+    .sort(function (a, b) { return a.createdAt - b.createdAt; })
+    .map(publicComment_);
+
   return {
     board: publicBoard_(board),
     sections: sections.map(function (s) {
       return { id: s.id, boardId: s.boardId, title: str_(s.title), order: Number(s.order) || 0, createdAt: Number(s.createdAt) || 0 };
     }),
     posts: posts,
+    comments: comments,
   };
 }
 
@@ -154,13 +161,12 @@ function createBoard_(p) {
     deleted: false,
   };
   appendRows_('Boards', [board]);
-  // 기본 섹션 하나 생성
+  // 기본 첫 섹션 생성
   appendRows_('Sections', [{ id: genId_('s'), boardId: board.id, title: '첫 번째 섹션', order: 0, createdAt: Date.now(), deleted: false }]);
   return publicBoard_(board);
 }
 
 function deleteBoard_(p) {
-  // 보드 삭제는 마스터 비밀번호만 허용
   if (String(p.password || '') !== getMasterPassword_()) throw new Error('마스터 관리자 권한이 필요합니다.');
   if (!markDeleted_('Boards', p.boardId)) throw new Error('보드를 찾을 수 없습니다.');
   return { boardId: p.boardId };
@@ -171,17 +177,43 @@ function createSection_(p) {
   requireBoard_(p.boardId);
   var title = clip_(p.title, 200);
   if (!title) throw new Error('섹션 이름을 입력하세요.');
-  var existing = readTable_('Sections').filter(function (s) { return s.boardId === p.boardId; });
+  var existing = readTable_('Sections').filter(function (s) { return s.boardId === p.boardId && notDeleted_(s); });
   var maxOrder = existing.reduce(function (m, s) { return Math.max(m, Number(s.order) || 0); }, -1);
   var section = { id: genId_('s'), boardId: p.boardId, title: title, order: maxOrder + 1, createdAt: Date.now(), deleted: false };
   appendRows_('Sections', [section]);
   return section;
 }
 
+function updateSection_(p) {
+  assertAdmin_(p.boardId, p.password);
+  var title = clip_(p.title, 200);
+  if (!title) throw new Error('섹션 이름을 입력하세요.');
+  var row = findRow_('Sections', p.sectionId, p.boardId);
+  if (!row) throw new Error('섹션을 찾을 수 없습니다.');
+  updateCell_('Sections', row._row, 'title', title);
+  return { sectionId: p.sectionId, title: title };
+}
+
+function reorderSections_(p) {
+  assertAdmin_(p.boardId, p.password);
+  var ids = Array.isArray(p.sectionIds) ? p.sectionIds : [];
+  if (!ids.length) return { reordered: 0 };
+  var sections = readTable_('Sections').filter(function (s) { return s.boardId === p.boardId && notDeleted_(s); });
+  var byId = {};
+  sections.forEach(function (s) { byId[s.id] = s; });
+
+  ids.forEach(function (id, idx) {
+    var s = byId[id];
+    if (s) {
+      updateCell_('Sections', s._row, 'order', idx);
+    }
+  });
+  return { reordered: ids.length };
+}
+
 function deleteSection_(p) {
   assertAdmin_(p.boardId, p.password);
   if (!markDeleted_('Sections', p.sectionId, p.boardId)) throw new Error('섹션을 찾을 수 없습니다.');
-  // 섹션에 속한 게시물도 함께 소프트 삭제
   markDeletedWhere_('Posts', function (row) { return row.sectionId === p.sectionId && row.boardId === p.boardId; });
   return { sectionId: p.sectionId };
 }
@@ -198,6 +230,10 @@ function createPost_(p) {
     imageKind = p.image.kind === 'drawing' ? 'drawing' : 'upload';
   }
   if (!content && !title && !imageUrl) throw new Error('내용 또는 이미지를 입력하세요.');
+
+  var existing = readTable_('Posts').filter(function (x) { return x.boardId === p.boardId && x.sectionId === p.sectionId && notDeleted_(x); });
+  var maxOrder = existing.reduce(function (m, x) { return Math.max(m, Number(x.order) || 0); }, -1);
+
   var post = {
     id: genId_('p'),
     boardId: p.boardId,
@@ -209,6 +245,9 @@ function createPost_(p) {
     imageKind: imageKind,
     sourceUrl: '',
     linkUrl: clip_(p.linkUrl, 2000),
+    order: maxOrder + 1,
+    passwordHash: p.password ? sha256_(String(p.password)) : '',
+    likes: 0,
     createdAt: Date.now(),
     deleted: false,
   };
@@ -216,24 +255,140 @@ function createPost_(p) {
   return publicPost_(post);
 }
 
+function updatePost_(p) {
+  var row = findRow_('Posts', p.postId, p.boardId);
+  if (!row) throw new Error('게시물을 찾을 수 없습니다.');
+  assertPostOwnerOrAdmin_(row, p.password, p.boardId);
+
+  var title = clip_(p.title, 300);
+  var content = clip_(p.content, 20000);
+  var author = clip_(p.author, 100) || '익명';
+  var linkUrl = clip_(p.linkUrl, 2000);
+
+  updateCell_('Posts', row._row, 'title', title);
+  updateCell_('Posts', row._row, 'content', content);
+  updateCell_('Posts', row._row, 'author', author);
+  updateCell_('Posts', row._row, 'linkUrl', linkUrl);
+
+  // 이미지 교체 또는 삭제
+  if (p.image) {
+    if (p.image.base64) {
+      var imageUrl = saveBase64Image_(p.image.base64, p.image.mimeType, p.image.kind || 'upload');
+      var imageKind = p.image.kind === 'drawing' ? 'drawing' : 'upload';
+      updateCell_('Posts', row._row, 'imageUrl', imageUrl);
+      updateCell_('Posts', row._row, 'imageKind', imageKind);
+    } else if (p.image.remove) {
+      updateCell_('Posts', row._row, 'imageUrl', '');
+      updateCell_('Posts', row._row, 'imageKind', '');
+    }
+  }
+
+  // 섹션 이동 요청도 함께 포함된 경우
+  if (p.sectionId && p.sectionId !== row.sectionId) {
+    requireSection_(p.boardId, p.sectionId);
+    updateCell_('Posts', row._row, 'sectionId', p.sectionId);
+  }
+
+  var updated = findRow_('Posts', p.postId, p.boardId);
+  return publicPost_(updated);
+}
+
+function movePost_(p) {
+  var row = findRow_('Posts', p.postId, p.boardId);
+  if (!row) throw new Error('게시물을 찾을 수 없습니다.');
+
+  var targetSectionId = p.targetSectionId || row.sectionId;
+  requireSection_(p.boardId, targetSectionId);
+
+  var newOrder = typeof p.newOrder === 'number' ? p.newOrder : Number(row.order) || 0;
+  updateCell_('Posts', row._row, 'sectionId', targetSectionId);
+  updateCell_('Posts', row._row, 'order', newOrder);
+
+  // 같은 섹션 내 순서 재정렬이 주어진 경우
+  if (Array.isArray(p.orderedPostIds)) {
+    var posts = readTable_('Posts').filter(function (x) { return x.boardId === p.boardId && x.sectionId === targetSectionId && notDeleted_(x); });
+    var byId = {};
+    posts.forEach(function (x) { byId[x.id] = x; });
+    p.orderedPostIds.forEach(function (id, idx) {
+      if (byId[id]) {
+        updateCell_('Posts', byId[id]._row, 'order', idx);
+      }
+    });
+  }
+
+  return { postId: p.postId, sectionId: targetSectionId, order: newOrder };
+}
+
+function likePost_(p) {
+  var row = findRow_('Posts', p.postId, p.boardId);
+  if (!row) throw new Error('게시물을 찾을 수 없습니다.');
+  var delta = Number(p.delta) || 1;
+  var current = Math.max(0, Number(row.likes) || 0);
+  var next = Math.max(0, current + delta);
+  updateCell_('Posts', row._row, 'likes', next);
+  return { postId: p.postId, likes: next };
+}
+
 function deletePost_(p) {
-  assertAdmin_(p.boardId, p.password);
+  var row = findRow_('Posts', p.postId, p.boardId);
+  if (!row) throw new Error('게시물을 찾을 수 없습니다.');
+  assertPostOwnerOrAdmin_(row, p.password, p.boardId);
+
   if (!markDeleted_('Posts', p.postId, p.boardId)) throw new Error('게시물을 찾을 수 없습니다.');
+  // 연관 댓글도 삭제
+  markDeletedWhere_('Comments', function (c) { return c.postId === p.postId && c.boardId === p.boardId; });
   return { postId: p.postId };
 }
 
-/**
- * 패들렛 CSV 마이그레이션 (프론트엔드에서 10건 내외로 나눠서 호출)
- *  p.posts = [{ sectionTitle, title, author, content, attachmentUrl, createdAt }]
- *  - attachmentUrl 은 브라우저가 아닌 서버(GAS)에서 UrlFetchApp 으로 다운로드 → CORS 문제 없음
- *  - 이미지면 드라이브에 영구 저장, 이미지가 아니면 링크(linkUrl)로 보존
- */
+function verifyPostPassword_(postId, password) {
+  var row = readTable_('Posts').filter(function (x) { return x.id === String(postId); })[0];
+  if (!row || !row.passwordHash) return false;
+  return row.passwordHash === sha256_(String(password || ''));
+}
+
+function assertPostOwnerOrAdmin_(postRow, password, boardId) {
+  if (isAdmin_(boardId, password)) return; // 관리자는 무조건 허용
+  var pw = String(password || '');
+  if (!pw) throw new Error('비밀번호를 입력하세요.');
+  if (postRow.passwordHash && postRow.passwordHash === sha256_(pw)) return;
+  throw new Error('비밀번호가 올바르지 않습니다.');
+}
+
+// ───────────────────────── Comments ─────────────────────────
+function createComment_(p) {
+  requireBoard_(p.boardId);
+  var post = findRow_('Posts', p.postId, p.boardId);
+  if (!post) throw new Error('존재하지 않거나 삭제된 메모입니다.');
+
+  var content = clip_(p.content, 2000);
+  if (!content) throw new Error('댓글 내용을 입력하세요.');
+
+  var comment = {
+    id: genId_('c'),
+    postId: p.postId,
+    boardId: p.boardId,
+    author: clip_(p.author, 100) || '익명',
+    content: content,
+    createdAt: Date.now(),
+    deleted: false,
+  };
+  appendRows_('Comments', [comment]);
+  return publicComment_(comment);
+}
+
+function deleteComment_(p) {
+  assertAdmin_(p.boardId, p.password);
+  if (!markDeleted_('Comments', p.commentId, p.boardId)) throw new Error('댓글을 찾을 수 없습니다.');
+  return { commentId: p.commentId };
+}
+
+// ───────────────────────── 패들렛 CSV/XLSX 마이그레이션 ─────────────────────────
 function importPosts_(p) {
   requireBoard_(p.boardId);
   var items = Array.isArray(p.posts) ? p.posts.slice(0, 50) : [];
   if (!items.length) return { imported: 0, results: [] };
 
-  // 1) 섹션 이름 → ID 매핑 (없으면 생성)
+  // 1) 섹션 이름 매핑
   var sections = readTable_('Sections').filter(function (s) { return s.boardId === p.boardId && notDeleted_(s); });
   var byTitle = {};
   sections.forEach(function (s) { byTitle[str_(s.title)] = s.id; });
@@ -263,7 +418,6 @@ function importPosts_(p) {
     try {
       responses = UrlFetchApp.fetchAll(requests);
     } catch (err) {
-      // fetchAll 전체 실패 시 개별 재시도
       responses = requests.map(function (r) {
         try { return UrlFetchApp.fetch(r.url, r); } catch (e) { return null; }
       });
@@ -274,6 +428,7 @@ function importPosts_(p) {
 
   // 3) 행 생성
   var results = [];
+  var postOrderMap = {};
   var rows = items.map(function (it, i) {
     var url = String(it.attachmentUrl || '').trim();
     var imageUrl = '', linkUrl = '', status = 'text';
@@ -295,12 +450,19 @@ function importPosts_(p) {
     } else if (url) {
       linkUrl = url; status = 'link';
     }
+
+    var secId = byTitle[clip_(it.sectionTitle, 200) || '가져온 게시물'];
+    postOrderMap[secId] = (postOrderMap[secId] !== undefined ? postOrderMap[secId] + 1 : 0);
+
     var created = Number(new Date(it.createdAt)) || Date.now();
-    results.push({ index: i, status: status });
+    var likes = Number(it.likes) || 0;
+    var postId = genId_('p');
+    results.push({ index: i, postId: postId, status: status });
+
     return {
-      id: genId_('p'),
+      id: postId,
       boardId: p.boardId,
-      sectionId: byTitle[clip_(it.sectionTitle, 200) || '가져온 게시물'],
+      sectionId: secId,
       title: clip_(it.title, 300),
       author: clip_(it.author, 100) || '익명',
       content: clip_(it.content, 20000),
@@ -308,11 +470,35 @@ function importPosts_(p) {
       imageKind: imageUrl ? 'migrated' : '',
       sourceUrl: url,
       linkUrl: linkUrl,
+      order: postOrderMap[secId],
+      passwordHash: '',
+      likes: likes,
       createdAt: created,
       deleted: false,
     };
   });
   appendRows_('Posts', rows);
+
+  // 4) 댓글 마이그레이션이 포함된 경우
+  if (Array.isArray(p.comments) && p.comments.length) {
+    var commentRows = [];
+    p.comments.forEach(function (c) {
+      var targetPost = results[c.postIndex];
+      if (targetPost && targetPost.postId) {
+        commentRows.push({
+          id: genId_('c'),
+          postId: targetPost.postId,
+          boardId: p.boardId,
+          author: clip_(c.author, 100) || '익명',
+          content: clip_(c.content, 2000),
+          createdAt: Number(new Date(c.createdAt)) || Date.now(),
+          deleted: false,
+        });
+      }
+    });
+    if (commentRows.length) appendRows_('Comments', commentRows);
+  }
+
   return { imported: rows.length, results: results, newSections: newSections.length };
 }
 
@@ -347,10 +533,8 @@ function saveBlobImage_(blob, prefix) {
   try {
     file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
   } catch (e) {
-    // 학교/회사 Workspace 정책상 외부 공유가 막혀 있으면 같은 도메인 사용자만 볼 수 있습니다.
     try { file.setSharing(DriveApp.Access.DOMAIN_WITH_LINK, DriveApp.Permission.VIEW); } catch (e2) {}
   }
-  // <img> 태그에서 바로 표시 가능한 썸네일 URL
   return 'https://drive.google.com/thumbnail?id=' + file.getId() + '&sz=w1600';
 }
 
@@ -360,7 +544,6 @@ function getMasterPassword_() {
   return v ? String(v) : DEFAULT_ADMIN_PASSWORD;
 }
 
-/** 마스터 비밀번호 또는 보드 생성 시 지정한 보드 전용 비밀번호 */
 function isAdmin_(boardId, password) {
   password = String(password || '');
   if (!password) return false;
@@ -389,10 +572,23 @@ function ensureSheets_() {
       sh = ss.insertSheet(name);
       sh.getRange(1, 1, 1, SCHEMA[name].length).setValues([SCHEMA[name]]).setFontWeight('bold').setBackground('#e8eaf6');
       sh.setFrozenRows(1);
+    } else {
+      // 기존 시트에 새로운 컬럼이 추가되었는지 확인하고 우측에 자동 보강
+      var lastCol = Math.max(1, sh.getLastColumn());
+      var existingHeaders = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(str_);
+      var toAdd = [];
+      SCHEMA[name].forEach(function (col) {
+        if (existingHeaders.indexOf(col) === -1) {
+          toAdd.push(col);
+        }
+      });
+      if (toAdd.length) {
+        sh.getRange(1, lastCol + 1, 1, toAdd.length).setValues([toAdd]).setFontWeight('bold').setBackground('#e8eaf6');
+      }
     }
   });
   var def = ss.getSheetByName('Sheet1') || ss.getSheetByName('시트1');
-  if (def && ss.getSheets().length > 3 && def.getLastRow() === 0) ss.deleteSheet(def);
+  if (def && ss.getSheets().length > 4 && def.getLastRow() === 0) ss.deleteSheet(def);
 }
 
 function sheet_(name) {
@@ -403,14 +599,21 @@ function readTable_(name) {
   var sh = sheet_(name);
   var last = sh.getLastRow();
   if (last < 2) return [];
-  var cols = SCHEMA[name];
-  var values = sh.getRange(2, 1, last - 1, cols.length).getValues();
+  var lastCol = Math.max(1, sh.getLastColumn());
+  var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(str_);
+  var values = sh.getRange(2, 1, last - 1, lastCol).getValues();
+
   return values.map(function (r, i) {
     var o = { _row: i + 2 };
-    cols.forEach(function (c, j) { o[c] = r[j] instanceof Date ? r[j].getTime() : r[j]; });
+    headers.forEach(function (c, j) {
+      if (c) {
+        o[c] = r[j] instanceof Date ? r[j].getTime() : r[j];
+      }
+    });
     o.id = str_(o.id);
     if ('boardId' in o) o.boardId = str_(o.boardId);
     if ('sectionId' in o) o.sectionId = str_(o.sectionId);
+    if ('postId' in o) o.postId = str_(o.postId);
     o.createdAt = Number(o.createdAt) || 0;
     return o;
   }).filter(function (o) { return o.id; });
@@ -419,26 +622,46 @@ function readTable_(name) {
 function appendRows_(name, objects) {
   if (!objects.length) return;
   var sh = sheet_(name);
-  var cols = SCHEMA[name];
-  var rows = objects.map(function (o) { return cols.map(function (c) { return toCell_(o[c]); }); });
-  sh.getRange(sh.getLastRow() + 1, 1, rows.length, cols.length).setValues(rows);
+  var lastCol = Math.max(1, sh.getLastColumn());
+  var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(str_);
+  var rows = objects.map(function (o) {
+    return headers.map(function (c) { return toCell_(o[c]); });
+  });
+  sh.getRange(sh.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+function updateCell_(name, rowNum, colName, value) {
+  var sh = sheet_(name);
+  var lastCol = Math.max(1, sh.getLastColumn());
+  var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(str_);
+  var colIdx = headers.indexOf(colName);
+  if (colIdx === -1) {
+    // 없으면 컬럼 추가
+    colIdx = headers.length;
+    sh.getRange(1, colIdx + 1).setValue(colName).setFontWeight('bold').setBackground('#e8eaf6');
+  }
+  sh.getRange(rowNum, colIdx + 1).setValue(toCell_(value));
+}
+
+function findRow_(name, id, boardId) {
+  return readTable_(name).filter(function (r) {
+    return r.id === String(id) && (!boardId || r.boardId === String(boardId));
+  })[0] || null;
 }
 
 function markDeleted_(name, id, boardId) {
   if (!id) return false;
-  var row = readTable_(name).filter(function (r) {
-    return r.id === String(id) && (!boardId || name === 'Boards' || r.boardId === String(boardId));
-  })[0];
+  var row = findRow_(name, id, boardId);
   if (!row) return false;
-  sheet_(name).getRange(row._row, SCHEMA[name].indexOf('deleted') + 1).setValue(true);
+  updateCell_(name, row._row, 'deleted', true);
   return true;
 }
 
 function markDeletedWhere_(name, predicate) {
-  var sh = sheet_(name);
-  var col = SCHEMA[name].indexOf('deleted') + 1;
   readTable_(name).forEach(function (r) {
-    if (notDeleted_(r) && predicate(r)) sh.getRange(r._row, col).setValue(true);
+    if (notDeleted_(r) && predicate(r)) {
+      updateCell_(name, r._row, 'deleted', true);
+    }
   });
 }
 
@@ -460,15 +683,35 @@ function publicBoard_(b, extra) {
 }
 function publicPost_(x) {
   return {
-    id: x.id, boardId: x.boardId, sectionId: x.sectionId, title: str_(x.title), author: str_(x.author),
-    content: str_(x.content), imageUrl: str_(x.imageUrl), imageKind: str_(x.imageKind),
-    sourceUrl: str_(x.sourceUrl), linkUrl: str_(x.linkUrl), createdAt: Number(x.createdAt) || 0,
+    id: x.id,
+    boardId: x.boardId,
+    sectionId: x.sectionId,
+    title: str_(x.title),
+    author: str_(x.author),
+    content: str_(x.content),
+    imageUrl: str_(x.imageUrl),
+    imageKind: str_(x.imageKind),
+    sourceUrl: str_(x.sourceUrl),
+    linkUrl: str_(x.linkUrl),
+    order: Number(x.order) || 0,
+    likes: Number(x.likes) || 0,
+    hasPassword: !!x.passwordHash,
+    createdAt: Number(x.createdAt) || 0,
+  };
+}
+function publicComment_(c) {
+  return {
+    id: c.id,
+    postId: c.postId,
+    boardId: c.boardId,
+    author: str_(c.author),
+    content: str_(c.content),
+    createdAt: Number(c.createdAt) || 0,
   };
 }
 function notDeleted_(r) {
   return !(r.deleted === true || String(r.deleted).toUpperCase() === 'TRUE');
 }
-/** 타임스탬프 기반 고유 ID (예: b-mh3k2x9a-4f7q) */
 function genId_(prefix) {
   return prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
 }
@@ -478,7 +721,6 @@ function sha256_(s) {
   var d = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s, Utilities.Charset.UTF_8);
   return d.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
 }
-/** 문자열 앞에 ' 를 붙여 수식 인젝션(=, +, -, @) 및 숫자/날짜 자동 변환을 방지 */
 function toCell_(v) {
   if (typeof v === 'string' && v.length) return "'" + v;
   return v === undefined || v === null ? '' : v;

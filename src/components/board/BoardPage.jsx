@@ -4,28 +4,55 @@ import { IS_MOCK, POLL_INTERVAL } from '../../config';
 import { useAdmin } from '../../hooks/useAdmin';
 import { boardUrl } from '../../hooks/useBoardRoute';
 import AdminLoginModal from '../common/AdminLoginModal';
+import PasswordPromptModal from '../common/PasswordPromptModal';
 import ShareModal from '../common/ShareModal';
 import Spinner from '../common/Spinner';
 import { useToast } from '../common/Toast';
 import { gradientFor } from '../hub/HubPage';
 import CsvImportModal from './CsvImportModal';
 import PostComposer from './PostComposer';
+import PostEditModal from './PostEditModal';
 import Section from './Section';
 
-/** 개별 보드 화면 (?board=보드ID) — 해당 보드의 Sections / Posts 만 필터링해 표시 */
+const LIKES_KEY = 'mathrillerpad-likes-v1';
+
+/** 개별 보드 화면 (?board=보드ID) */
 export default function BoardPage({ boardId, navigate }) {
   const toast = useToast();
   const admin = useAdmin(boardId);
-  const [data, setData] = useState(null); // { board, sections, posts }
+  const [data, setData] = useState(null); // { board, sections, posts, comments }
   const [error, setError] = useState('');
   const [syncing, setSyncing] = useState(false);
+
+  // 모달 상태
   const [composerSection, setComposerSection] = useState(null);
+  const [editingPost, setEditingPost] = useState(null);
+  const [confirmedPassword, setConfirmedPassword] = useState('');
+  const [promptModal, setPromptModal] = useState({ open: false, post: null, action: 'edit' });
   const [showLogin, setShowLogin] = useState(false);
   const [showImport, setShowImport] = useState(false);
-  const [lightbox, setLightbox] = useState(null);
   const [showShare, setShowShare] = useState(false);
+  const [lightbox, setLightbox] = useState(null);
+
+  // 새 섹션 추가 상태
   const [newSection, setNewSection] = useState('');
   const [addingSection, setAddingSection] = useState(false);
+
+  // 좋아요 누른 게시물 목록 (localStorage)
+  const [likedPosts, setLikedPosts] = useState(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(LIKES_KEY) || '[]'));
+    } catch {
+      return new Set();
+    }
+  });
+
+  const persistLikedPosts = (nextSet) => {
+    try {
+      localStorage.setItem(LIKES_KEY, JSON.stringify([...nextSet]));
+    } catch { /* ignore */ }
+    setLikedPosts(new Set(nextSet));
+  };
 
   // 경쟁 상태(Race Condition) 방지용 요청 시퀀스 카운터
   const reqSeqRef = useRef(0);
@@ -39,7 +66,6 @@ export default function BoardPage({ boardId, navigate }) {
       const seq = ++reqSeqRef.current;
       try {
         const d = await api.getBoard(boardId);
-        // 더 최신 요청이나 낙관적 업데이트가 발생했다면 이전 응답은 버림
         if (seq < reqSeqRef.current) return;
         setData(d);
         setError('');
@@ -54,7 +80,6 @@ export default function BoardPage({ boardId, navigate }) {
     [boardId],
   );
 
-  // 최초 로드 + 주기적 동기화 (탭이 활성화되어 있을 때만)
   useEffect(() => {
     load();
     const t = setInterval(() => !document.hidden && load(true), POLL_INTERVAL);
@@ -68,21 +93,37 @@ export default function BoardPage({ boardId, navigate }) {
 
   const postsBySection = useMemo(() => {
     const m = {};
-    data?.posts.forEach((p) => {
+    data?.posts?.forEach((p) => {
       const sId = String(p.sectionId);
       (m[sId] ||= []).push(p);
     });
     return m;
   }, [data]);
 
-  // ── 액션 ──
+  const commentsByPost = useMemo(() => {
+    const m = {};
+    data?.comments?.forEach((c) => {
+      const pId = String(c.postId);
+      (m[pId] ||= []).push(c);
+    });
+    return m;
+  }, [data]);
+
+  const handleAuthError = (err) => {
+    toast(err.message, 'error');
+    if (err.message.includes('권한') || err.message.includes('비밀번호')) {
+      admin.logout();
+    }
+  };
+
+  // ───────────────────────── 섹션 액션 ─────────────────────────
   const addSection = async (e) => {
     e.preventDefault();
     if (!newSection.trim()) return;
     setAddingSection(true);
     try {
       const s = await api.createSection({ boardId, title: newSection });
-      ++reqSeqRef.current; // 이전 폴링 응답 무효화
+      ++reqSeqRef.current;
       setData((d) => ({ ...d, sections: [...d.sections, s] }));
       setNewSection('');
       toast('새 섹션이 추가되었습니다');
@@ -93,45 +134,52 @@ export default function BoardPage({ boardId, navigate }) {
     }
   };
 
-  const createPost = async (payload) => {
-    const post = await api.createPost({ boardId, sectionId: composerSection.id, ...payload });
-    ++reqSeqRef.current;
-    setData((d) => ({ ...d, posts: [...d.posts, post] }));
-    toast('메모가 등록되었습니다');
-  };
-
-  const handleAuthError = (err) => {
-    toast(err.message, 'error');
-    if (err.message.includes('권한') || err.message.includes('비밀번호')) admin.logout();
-  };
-
-  // 낙관적 업데이트 (Optimistic Update) 적용 메모 삭제
-  const deletePost = async (post) => {
-    if (!confirm('이 메모를 삭제할까요?')) return;
+  const handleUpdateSectionTitle = async (section, newTitle) => {
+    if (!newTitle.trim() || newTitle.trim() === section.title) return;
     ++reqSeqRef.current;
     const backup = data;
     setData((d) => ({
       ...d,
-      posts: d.posts.filter((p) => String(p.id) !== String(post.id)),
+      sections: d.sections.map((s) => (s.id === section.id ? { ...s, title: newTitle.trim() } : s)),
     }));
-    toast('메모를 삭제했습니다');
-
+    toast('섹션 이름이 변경되었습니다');
     try {
-      await api.deletePost({ boardId, postId: post.id, password: admin.password });
+      await api.updateSection({ boardId, sectionId: section.id, title: newTitle.trim(), password: admin.password });
     } catch (err) {
-      setData(backup); // 실패 시 롤백
+      setData(backup);
       handleAuthError(err);
     }
   };
 
-  // 낙관적 업데이트 (Optimistic Update) 적용 섹션 삭제: 클릭 즉시 화면에서 제거!
+  const handleMoveSection = async (section, direction) => {
+    const list = [...(data?.sections || [])];
+    const idx = list.findIndex((s) => s.id === section.id);
+    if (idx < 0) return;
+    const targetIdx = direction === 'left' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= list.length) return;
+
+    const temp = list[idx];
+    list[idx] = list[targetIdx];
+    list[targetIdx] = temp;
+    const reordered = list.map((s, i) => ({ ...s, order: i }));
+
+    ++reqSeqRef.current;
+    const backup = data;
+    setData((d) => ({ ...d, sections: reordered }));
+    try {
+      await api.reorderSections({ boardId, sectionIds: reordered.map((s) => s.id), password: admin.password });
+    } catch (err) {
+      setData(backup);
+      handleAuthError(err);
+    }
+  };
+
   const deleteSection = async (section) => {
     const n = postsBySection[String(section.id)]?.length || 0;
     if (!confirm(`"${section.title}" 섹션${n ? `과 메모 ${n}개` : ''}를 삭제할까요?`)) return;
 
-    ++reqSeqRef.current; // 진행 중인 오래된 폴링 응답 무효화
+    ++reqSeqRef.current;
     const backup = data;
-    // UI에서 즉시 제거
     setData((d) => ({
       ...d,
       sections: d.sections.filter((s) => String(s.id) !== String(section.id)),
@@ -142,12 +190,169 @@ export default function BoardPage({ boardId, navigate }) {
     try {
       await api.deleteSection({ boardId, sectionId: section.id, password: admin.password });
     } catch (err) {
-      setData(backup); // 실패 시 원래대로 복구
+      setData(backup);
       handleAuthError(err);
     }
   };
 
-  // ── 렌더 ──
+  // ───────────────────────── 메모 액션 ─────────────────────────
+  const createPost = async (payload) => {
+    const post = await api.createPost({ boardId, sectionId: composerSection.id, ...payload });
+    ++reqSeqRef.current;
+    setData((d) => ({ ...d, posts: [...d.posts, post] }));
+    toast('메모가 등록되었습니다');
+  };
+
+  const handleMovePost = async (postOrId, targetSectionId) => {
+    const postId = typeof postOrId === 'string' ? postOrId : postOrId.id;
+    const currentPost = data?.posts?.find((p) => String(p.id) === String(postId));
+    if (!currentPost || String(currentPost.sectionId) === String(targetSectionId)) return;
+
+    ++reqSeqRef.current;
+    const backup = data;
+    setData((d) => ({
+      ...d,
+      posts: d.posts.map((p) => (String(p.id) === String(postId) ? { ...p, sectionId: targetSectionId } : p)),
+    }));
+    toast('메모를 이동했습니다');
+
+    try {
+      await api.movePost({ boardId, postId, targetSectionId });
+    } catch (err) {
+      setData(backup);
+      toast(err.message, 'error');
+    }
+  };
+
+  // 하트 좋아요 토글
+  const handleToggleLike = async (post) => {
+    const isLiked = likedPosts.has(post.id);
+    const delta = isLiked ? -1 : 1;
+    const nextLikes = new Set(likedPosts);
+    if (isLiked) nextLikes.delete(post.id);
+    else nextLikes.add(post.id);
+    persistLikedPosts(nextLikes);
+
+    // 낙관적 업데이트
+    setData((d) => ({
+      ...d,
+      posts: d.posts.map((p) =>
+        p.id === post.id ? { ...p, likes: Math.max(0, (p.likes || 0) + delta) } : p,
+      ),
+    }));
+
+    try {
+      await api.likePost({ boardId, postId: post.id, delta });
+    } catch {
+      // 실패 시 롤백
+      const rollSet = new Set(likedPosts);
+      persistLikedPosts(rollSet);
+      setData((d) => ({
+        ...d,
+        posts: d.posts.map((p) =>
+          p.id === post.id ? { ...p, likes: post.likes || 0 } : p,
+        ),
+      }));
+    }
+  };
+
+  // 수정 요청
+  const handleEditRequest = (post) => {
+    if (admin.isAdmin) {
+      setConfirmedPassword(admin.password);
+      setEditingPost(post);
+    } else if (post.hasPassword) {
+      setPromptModal({ open: true, post, action: 'edit' });
+    } else {
+      setShowLogin(true);
+      toast('작성 시 비밀번호를 설정하지 않은 메모는 관리자만 수정할 수 있습니다.', 'info');
+    }
+  };
+
+  // 삭제 요청
+  const handleDeleteRequest = async (post) => {
+    if (admin.isAdmin) {
+      if (!confirm('이 메모를 삭제할까요?')) return;
+      ++reqSeqRef.current;
+      const backup = data;
+      setData((d) => ({ ...d, posts: d.posts.filter((p) => String(p.id) !== String(post.id)) }));
+      toast('메모를 삭제했습니다');
+      try {
+        await api.deletePost({ boardId, postId: post.id, password: admin.password });
+      } catch (err) {
+        setData(backup);
+        handleAuthError(err);
+      }
+    } else if (post.hasPassword) {
+      setPromptModal({ open: true, post, action: 'delete' });
+    } else {
+      setShowLogin(true);
+      toast('작성 시 비밀번호를 설정하지 않은 메모는 관리자만 삭제할 수 있습니다.', 'info');
+    }
+  };
+
+  // 비밀번호 입력 모달 제출
+  const handlePromptSubmit = async (password) => {
+    const post = promptModal.post;
+    if (!post) return;
+
+    if (promptModal.action === 'edit') {
+      const { valid } = await api.verifyPostPassword({ postId: post.id, password });
+      if (!valid) throw new Error('비밀번호가 일치하지 않습니다.');
+      setConfirmedPassword(password);
+      setEditingPost(post);
+    } else if (promptModal.action === 'delete') {
+      ++reqSeqRef.current;
+      const backup = data;
+      setData((d) => ({ ...d, posts: d.posts.filter((p) => String(p.id) !== String(post.id)) }));
+      try {
+        await api.deletePost({ boardId, postId: post.id, password });
+        toast('메모를 삭제했습니다');
+      } catch (err) {
+        setData(backup);
+        throw err;
+      }
+    }
+  };
+
+  // 메모 수정 실행
+  const handleUpdatePost = async (payload) => {
+    const updated = await api.updatePost({ boardId, ...payload });
+    ++reqSeqRef.current;
+    setData((d) => ({
+      ...d,
+      posts: d.posts.map((p) => (p.id === updated.id ? updated : p)),
+    }));
+    toast('메모가 수정되었습니다');
+  };
+
+  // ───────────────────────── 댓글 액션 ─────────────────────────
+  const handleAddComment = async (post, author, content) => {
+    try {
+      const comment = await api.createComment({ boardId, postId: post.id, author, content });
+      ++reqSeqRef.current;
+      setData((d) => ({ ...d, comments: [...(d.comments || []), comment] }));
+      toast('댓글을 등록했습니다');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+
+  const handleDeleteComment = async (comment) => {
+    if (!confirm('이 댓글을 삭제할까요?')) return;
+    ++reqSeqRef.current;
+    const backup = data;
+    setData((d) => ({ ...d, comments: (d.comments || []).filter((c) => c.id !== comment.id) }));
+    toast('댓글을 삭제했습니다');
+    try {
+      await api.deleteComment({ boardId, commentId: comment.id, password: admin.password });
+    } catch (err) {
+      setData(backup);
+      handleAuthError(err);
+    }
+  };
+
+  // ───────────────────────── 렌더 ─────────────────────────
   if (error && !data) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-3 p-6 text-center">
@@ -216,15 +421,28 @@ export default function BoardPage({ boardId, navigate }) {
 
       {/* 선반(Shelf): 가로로 나열되는 섹션 열 */}
       <main className="shelf-scroll flex min-h-0 flex-1 items-start gap-4 overflow-x-auto p-4 sm:p-5">
-        {sections.map((s) => (
+        {sections.map((s, idx) => (
           <Section
             key={s.id}
             section={s}
+            sectionIndex={idx}
+            totalSections={sections.length}
+            sections={sections}
             posts={postsBySection[String(s.id)] || []}
+            commentsByPost={commentsByPost}
+            likedPosts={likedPosts}
             isAdmin={admin.isAdmin}
             onAddPost={setComposerSection}
+            onUpdateTitle={handleUpdateSectionTitle}
+            onMoveSection={handleMoveSection}
             onDeleteSection={deleteSection}
-            onDeletePost={deletePost}
+            onToggleLike={handleToggleLike}
+            onEditRequest={handleEditRequest}
+            onDeleteRequest={handleDeleteRequest}
+            onMovePost={handleMovePost}
+            onAddComment={handleAddComment}
+            onDeleteComment={handleDeleteComment}
+            onDropPost={handleMovePost}
             onImageClick={setLightbox}
           />
         ))}
@@ -248,6 +466,7 @@ export default function BoardPage({ boardId, navigate }) {
         </form>
       </main>
 
+      {/* 메모 등록 모달 */}
       <PostComposer
         key={composerSection?.id}
         open={!!composerSection}
@@ -255,18 +474,49 @@ export default function BoardPage({ boardId, navigate }) {
         onClose={() => setComposerSection(null)}
         onSubmit={createPost}
       />
+
+      {/* 메모 수정 모달 */}
+      <PostEditModal
+        key={editingPost?.id}
+        open={!!editingPost}
+        post={editingPost}
+        sections={sections}
+        password={confirmedPassword}
+        onClose={() => { setEditingPost(null); setConfirmedPassword(''); }}
+        onSubmit={handleUpdatePost}
+      />
+
+      {/* 작성자 비밀번호 확인 모달 */}
+      <PasswordPromptModal
+        open={promptModal.open}
+        onClose={() => setPromptModal({ open: false, post: null, action: 'edit' })}
+        title={promptModal.action === 'edit' ? '✏️ 메모 수정 비밀번호' : '🗑️ 메모 삭제 비밀번호'}
+        actionLabel={promptModal.action === 'edit' ? '수정하기' : '삭제하기'}
+        hint={
+          promptModal.action === 'edit'
+            ? '이 메모를 등록할 때 설정한 비밀번호를 입력해 주세요.'
+            : '이 메모를 등록할 때 설정한 비밀번호를 입력하면 바로 삭제됩니다.'
+        }
+        onSubmit={handlePromptSubmit}
+      />
+
+      {/* 관리자 로그인 모달 */}
       <AdminLoginModal
         open={showLogin}
         onClose={() => setShowLogin(false)}
         onLogin={admin.login}
         hint={board.hasOwnPassword ? '보드 전용 비밀번호 또는 마스터 비밀번호를 입력하세요.' : '마스터 관리자 비밀번호를 입력하세요.'}
       />
+
+      {/* 공유 모달 */}
       <ShareModal
         open={showShare}
         onClose={() => setShowShare(false)}
         url={boardUrl(boardId)}
         title={board.title}
       />
+
+      {/* 패들렛 가져오기 모달 */}
       <CsvImportModal
         open={showImport}
         onClose={() => setShowImport(false)}
@@ -275,6 +525,7 @@ export default function BoardPage({ boardId, navigate }) {
         onDone={() => load(true)}
       />
 
+      {/* 라이트박스 (이미지 확대 보기) */}
       {lightbox && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4" onClick={() => setLightbox(null)}>
           <img src={lightbox} alt="" referrerPolicy="no-referrer" className="max-h-full max-w-full rounded-lg object-contain shadow-2xl" />
