@@ -296,6 +296,7 @@ function updatePost_(p) {
 function movePost_(p) {
   var row = findRow_('Posts', p.postId, p.boardId);
   if (!row) throw new Error('게시물을 찾을 수 없습니다.');
+  assertPostOwnerOrAdmin_(row, p.password, p.boardId);
 
   var targetSectionId = p.targetSectionId || row.sectionId;
   requireSection_(p.boardId, targetSectionId);
@@ -349,6 +350,9 @@ function verifyPostPassword_(postId, password) {
 function assertPostOwnerOrAdmin_(postRow, password, boardId) {
   if (isAdmin_(boardId, password)) return; // 관리자는 무조건 허용
   var pw = String(password || '');
+  if (!postRow.passwordHash) {
+    throw new Error('비밀번호가 설정되지 않은 메모는 관리자만 수정/삭제/이동할 수 있습니다.');
+  }
   if (!pw) throw new Error('비밀번호를 입력하세요.');
   if (postRow.passwordHash && postRow.passwordHash === sha256_(pw)) return;
   throw new Error('비밀번호가 올바르지 않습니다.');

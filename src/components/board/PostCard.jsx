@@ -48,6 +48,7 @@ export default function PostCard({
   onEditRequest,
   onDeleteRequest,
   onMovePost,
+  onDropOnPost,
   onAddComment,
   onDeleteComment,
   onImageClick,
@@ -55,6 +56,7 @@ export default function PostCard({
   const badge = KIND_BADGE[post.imageKind];
   const [showComments, setShowComments] = useState(false);
   const [showMoveMenu, setShowMoveMenu] = useState(false);
+  const [dragOverPosition, setDragOverPosition] = useState(null); // 'top' | 'bottom' | null
 
   // 댓글 입력 상태
   const [commentAuthor, setCommentAuthor] = useState(() => localStorage.getItem(AUTHOR_KEY) || '');
@@ -80,15 +82,65 @@ export default function PostCard({
 
   const handleDragStart = (e) => {
     e.dataTransfer.setData('text/plain', post.id);
+    e.dataTransfer.setData('application/json', JSON.stringify({ type: 'post', postId: post.id, sectionId: post.sectionId }));
     e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = e.currentTarget.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const pos = e.clientY < midY ? 'top' : 'bottom';
+    if (dragOverPosition !== pos) {
+      setDragOverPosition(pos);
+    }
+  };
+
+  const handleDragLeave = (e) => {
+    if (!e.currentTarget.contains(e.relatedTarget)) {
+      setDragOverPosition(null);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const pos = dragOverPosition || 'bottom';
+    setDragOverPosition(null);
+    let draggedPostId = e.dataTransfer.getData('text/plain');
+    try {
+      const raw = e.dataTransfer.getData('application/json');
+      if (raw) {
+        const json = JSON.parse(raw);
+        if (json.type === 'section') return;
+        if (json.postId) draggedPostId = json.postId;
+      }
+    } catch {}
+    if (draggedPostId && String(draggedPostId) !== String(post.id)) {
+      onDropOnPost?.(draggedPostId, post, pos);
+    }
   };
 
   return (
     <article
       draggable
       onDragStart={handleDragStart}
-      className="group animate-pop relative overflow-hidden rounded-2xl bg-white shadow-xs ring-1 ring-black/5 transition hover:shadow-md cursor-grab active:cursor-grabbing"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`group animate-pop relative overflow-hidden rounded-2xl bg-white shadow-xs ring-1 ring-black/5 transition hover:shadow-md cursor-grab active:cursor-grabbing ${
+        dragOverPosition === 'top' ? 'ring-2 ring-indigo-500 translate-y-0.5' : ''
+      } ${dragOverPosition === 'bottom' ? 'ring-2 ring-indigo-500 -translate-y-0.5' : ''}`}
     >
+      {/* 위/아래 드롭 위치 안내선 */}
+      {dragOverPosition === 'top' && (
+        <div className="pointer-events-none absolute left-0 right-0 top-0 z-30 h-1.5 bg-indigo-600 shadow-md animate-pulse" />
+      )}
+      {dragOverPosition === 'bottom' && (
+        <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-30 h-1.5 bg-indigo-600 shadow-md animate-pulse" />
+      )}
       {/* 카드 상단 제어 바 (수정 / 삭제 / 섹션 이동) */}
       <div className="absolute right-2 top-2 z-10 flex items-center gap-1 opacity-90 sm:opacity-0 group-hover:opacity-100 transition">
         {/* 섹션 이동 메뉴 버튼 */}

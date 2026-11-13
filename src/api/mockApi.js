@@ -68,6 +68,9 @@ async function assertAdmin(db, boardId, password) {
 
 async function assertPostOwnerOrAdmin(db, post, password, boardId) {
   if (await isAdmin(db, boardId, password)) return;
+  if (!post.passwordHash) {
+    throw new Error('비밀번호가 설정되지 않은 메모는 관리자만 수정/삭제/이동할 수 있습니다.');
+  }
   if (!password) throw new Error('비밀번호를 입력하세요.');
   if (post.passwordHash && post.passwordHash === (await sha256(password))) return;
   throw new Error('비밀번호가 올바르지 않습니다.');
@@ -230,10 +233,11 @@ export const mockApi = {
     return delay(publicPost(p));
   },
 
-  async movePost({ boardId, postId, targetSectionId, newOrder, orderedPostIds }) {
+  async movePost({ boardId, postId, targetSectionId, newOrder, orderedPostIds, password }) {
     const db = load();
     const p = db.Posts.find((x) => x.id === postId && x.boardId === boardId && alive(x));
     if (!p) throw new Error('게시물을 찾을 수 없습니다.');
+    await assertPostOwnerOrAdmin(db, p, password, boardId);
     if (targetSectionId) p.sectionId = targetSectionId;
     if (typeof newOrder === 'number') p.order = newOrder;
 

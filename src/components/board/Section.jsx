@@ -19,19 +19,24 @@ export default function Section({
   onAddPost,
   onUpdateTitle,
   onMoveSection,
+  onReorderSections,
   onDeleteSection,
   onToggleLike,
   onEditRequest,
   onDeleteRequest,
   onMovePost,
+  onDropPostOnPost,
+  onDropPostOnSection,
+  onDropSection,
   onAddComment,
   onDeleteComment,
-  onDropPost,
   onImageClick,
+  onRequireAdmin,
 }) {
   const [editing, setEditing] = useState(false);
   const [titleInput, setTitleInput] = useState(section.title);
-  const [isDragOver, setIsDragOver] = useState(false);
+  const [isPostDragOver, setIsPostDragOver] = useState(false);
+  const [sectionDragOverPos, setSectionDragOverPos] = useState(null); // 'left' | 'right' | null
 
   const handleTitleSubmit = (e) => {
     e.preventDefault();
@@ -44,19 +49,59 @@ export default function Section({
   const handleDragOver = (e) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    if (!isDragOver) setIsDragOver(true);
+
+    // 드래그 중인 타입 식별 시도 (브라우저에 따라 types에 포함)
+    const isDraggingSection = e.dataTransfer.types.includes('application/json');
+    const rect = e.currentTarget.getBoundingClientRect();
+    const midX = rect.left + rect.width / 2;
+    const pos = e.clientX < midX ? 'left' : 'right';
+
+    if (sectionDragOverPos !== pos) {
+      setSectionDragOverPos(pos);
+    }
+    if (!isPostDragOver) {
+      setIsPostDragOver(true);
+    }
   };
 
-  const handleDragLeave = () => {
-    setIsDragOver(false);
+  const handleDragLeave = (e) => {
+    if (!e.currentTarget.contains(e.relatedTarget)) {
+      setIsPostDragOver(false);
+      setSectionDragOverPos(null);
+    }
   };
 
   const handleDrop = (e) => {
     e.preventDefault();
-    setIsDragOver(false);
-    const postId = e.dataTransfer.getData('text/plain');
+    setIsPostDragOver(false);
+    const dropPos = sectionDragOverPos || 'right';
+    setSectionDragOverPos(null);
+
+    let raw = e.dataTransfer.getData('application/json');
+    let dataObj = null;
+    try {
+      if (raw) dataObj = JSON.parse(raw);
+    } catch {}
+
+    // 1) 섹션 드래그 앤 드롭
+    if (dataObj?.type === 'section') {
+      const draggedSectionId = dataObj.sectionId;
+      if (draggedSectionId && String(draggedSectionId) !== String(section.id)) {
+        onDropSection?.(draggedSectionId, section.id, dropPos);
+      }
+      return;
+    }
+
+    // 2) 메모 드래그 앤 드롭 (카드 위에 직접 떨어지지 않고 섹션 빈 공간에 떨어진 경우 맨 아래 추가)
+    const postId = dataObj?.postId || e.dataTransfer.getData('text/plain');
     if (postId) {
-      onDropPost(postId, section.id);
+      onDropPostOnSection?.(postId, section.id);
+    }
+  };
+
+  const handleGripClick = () => {
+    if (!isAdmin) {
+      onRequireAdmin?.('섹션 순서를 드래그하여 변경하려면 관리자 로그인이 필요합니다.');
     }
   };
 
@@ -65,13 +110,39 @@ export default function Section({
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`flex max-h-full w-[85vw] shrink-0 flex-col rounded-2xl bg-white/45 shadow-sm ring-1 ring-white/50 backdrop-blur-md transition sm:w-80 ${
-        isDragOver ? 'ring-2 ring-indigo-500 bg-indigo-50/60 scale-[1.01]' : ''
+      className={`relative flex max-h-full w-[85vw] shrink-0 flex-col rounded-2xl bg-white/45 shadow-sm ring-1 ring-white/50 backdrop-blur-md transition sm:w-80 ${
+        isPostDragOver ? 'ring-2 ring-indigo-500 bg-indigo-50/60 scale-[1.01]' : ''
+      } ${sectionDragOverPos === 'left' ? 'border-l-4 border-indigo-600' : ''} ${
+        sectionDragOverPos === 'right' ? 'border-r-4 border-indigo-600' : ''
       }`}
     >
       {/* 섹션 헤더 */}
       <header className="flex items-center gap-1.5 px-3 pb-2 pt-3">
-        {/* 섹션 좌우 이동 버튼 (관리자 또는 누구나) */}
+        {/* 섹션 드래그 그립 핸들 (관리자 드래그 가능) */}
+        <div
+          draggable={isAdmin}
+          onDragStart={(e) => {
+            if (!isAdmin) {
+              e.preventDefault();
+              onRequireAdmin?.('섹션 순서를 변경하려면 관리자 로그인이 필요합니다.');
+              return;
+            }
+            e.dataTransfer.setData('text/plain', section.id);
+            e.dataTransfer.setData('application/json', JSON.stringify({ type: 'section', sectionId: section.id }));
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onClick={handleGripClick}
+          title={isAdmin ? '드래그하여 섹션 순서 변경' : '섹션 순서 변경 (관리자 전용)'}
+          className={`flex h-6 w-6 items-center justify-center rounded-md text-xs font-bold transition shadow-2xs select-none ${
+            isAdmin
+              ? 'cursor-grab active:cursor-grabbing bg-white/80 hover:bg-white text-slate-700 hover:text-indigo-600'
+              : 'cursor-pointer bg-white/40 text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          ⠿
+        </div>
+
+        {/* 섹션 좌우 이동 버튼 */}
         <div className="flex items-center gap-0.5">
           <button
             type="button"
@@ -143,7 +214,7 @@ export default function Section({
       <div className="col-scroll flex-1 space-y-3 overflow-y-auto px-3 pb-2 min-h-24">
         {posts.length === 0 && (
           <div className="py-8 text-center text-xs text-slate-500/80 border-2 border-dashed border-white/40 rounded-xl my-2">
-            메모를 추가하거나 다른 섹션에서 끌어다 놓으세요
+            메모를 추가하거나 끌어다 놓으세요
           </div>
         )}
         {posts.map((p) => (
@@ -158,6 +229,7 @@ export default function Section({
             onEditRequest={onEditRequest}
             onDeleteRequest={onDeleteRequest}
             onMovePost={onMovePost}
+            onDropOnPost={onDropPostOnPost}
             onAddComment={onAddComment}
             onDeleteComment={onDeleteComment}
             onImageClick={onImageClick}

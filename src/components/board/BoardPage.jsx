@@ -28,7 +28,8 @@ export default function BoardPage({ boardId, navigate }) {
   const [composerSection, setComposerSection] = useState(null);
   const [editingPost, setEditingPost] = useState(null);
   const [confirmedPassword, setConfirmedPassword] = useState('');
-  const [promptModal, setPromptModal] = useState({ open: false, post: null, action: 'edit' });
+  const [knownPasswords, setKnownPasswords] = useState({}); // { [postId]: verifiedPassword }
+  const [promptModal, setPromptModal] = useState({ open: false, post: null, action: 'edit', pendingMove: null });
   const [showLogin, setShowLogin] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showShare, setShowShare] = useState(false);
@@ -199,28 +200,163 @@ export default function BoardPage({ boardId, navigate }) {
   const createPost = async (payload) => {
     const post = await api.createPost({ boardId, sectionId: composerSection.id, ...payload });
     ++reqSeqRef.current;
+    if (payload.password) {
+      setKnownPasswords((prev) => ({ ...prev, [post.id]: payload.password }));
+    }
     setData((d) => ({ ...d, posts: [...d.posts, post] }));
     toast('메모가 등록되었습니다');
   };
 
-  const handleMovePost = async (postOrId, targetSectionId) => {
-    const postId = typeof postOrId === 'string' ? postOrId : postOrId.id;
-    const currentPost = data?.posts?.find((p) => String(p.id) === String(postId));
-    if (!currentPost || String(currentPost.sectionId) === String(targetSectionId)) return;
+  const doMovePost = async (postId, targetSectionId, newOrder, orderedPostIds, password) => {
+    const post = data?.posts?.find((p) => String(p.id) === String(postId));
+    if (!post) return;
 
     ++reqSeqRef.current;
     const backup = data;
-    setData((d) => ({
-      ...d,
-      posts: d.posts.map((p) => (String(p.id) === String(postId) ? { ...p, sectionId: targetSectionId } : p)),
-    }));
-    toast('메모를 이동했습니다');
+
+    setData((d) => {
+      const updatedPosts = d.posts.map((p) => {
+        if (String(p.id) === String(postId)) {
+          return {
+            ...p,
+            sectionId: targetSectionId,
+            order: typeof newOrder === 'number' ? newOrder : p.order,
+          };
+        }
+        if (Array.isArray(orderedPostIds)) {
+          const idx = orderedPostIds.indexOf(p.id);
+          if (idx !== -1) {
+            return { ...p, order: idx };
+          }
+        }
+        return p;
+      });
+      return { ...d, posts: updatedPosts };
+    });
 
     try {
-      await api.movePost({ boardId, postId, targetSectionId });
+      await api.movePost({
+        boardId,
+        postId,
+        targetSectionId,
+        newOrder,
+        orderedPostIds,
+        password: password || admin.password,
+      });
+      toast('메모를 이동했습니다');
     } catch (err) {
       setData(backup);
-      toast(err.message, 'error');
+      handleAuthError(err);
+      throw err;
+    }
+  };
+
+  const handleMovePost = async (postOrId, targetSectionId, newOrder, orderedPostIds) => {
+    const postId = typeof postOrId === 'string' ? postOrId : postOrId.id;
+    const currentPost = data?.posts?.find((p) => String(p.id) === String(postId));
+    if (!currentPost) return;
+
+    // 관리자면 즉시 이동
+    if (admin.isAdmin) {
+      return doMovePost(postId, targetSectionId, newOrder, orderedPostIds, admin.password);
+    }
+
+    // 관리자가 아닌 경우: 암호가 없는 메모는 이동 불가
+    if (!currentPost.hasPassword) {
+      toast('비밀번호가 설정되지 않은 메모는 관리자만 이동할 수 있습니다.', 'info');
+      setShowLogin(true);
+      return;
+    }
+
+    // 이미 이번 세션에서 확인된 작성자 암호가 있는 경우 바로 이동
+    const cachedPw = knownPasswords[postId];
+    if (cachedPw) {
+      try {
+        return await doMovePost(postId, targetSectionId, newOrder, orderedPostIds, cachedPw);
+      } catch {
+        // 캐시된 비밀번호가 틀렸다면 캐시 삭제 후 모달 띄움
+        setKnownPasswords((prev) => {
+          const next = { ...prev };
+          delete next[postId];
+          return next;
+        });
+      }
+    }
+
+    // 암호 확인 모달 오픈
+    setPromptModal({
+      open: true,
+      post: currentPost,
+      action: 'move',
+      pendingMove: { postId, targetSectionId, newOrder, orderedPostIds },
+    });
+  };
+
+  // 메모 카드 위에 다른 메모 카드를 떨어뜨렸을 때 (위/아래 순서 변경 및 섹션 이동)
+  const handleDropPostOnPost = (draggedPostId, targetPost, dropPosition) => {
+    if (String(draggedPostId) === String(targetPost.id)) return;
+    const draggedPost = data?.posts?.find((p) => String(p.id) === String(draggedPostId));
+    if (!draggedPost) return;
+
+    const targetSectionId = targetPost.sectionId;
+    const currentList = (postsBySection[String(targetSectionId)] || []).filter(
+      (p) => String(p.id) !== String(draggedPostId),
+    );
+    const targetIdx = currentList.findIndex((p) => String(p.id) === String(targetPost.id));
+    const insertIdx = dropPosition === 'top' ? Math.max(0, targetIdx) : targetIdx + 1;
+
+    const newOrderedList = [...currentList];
+    newOrderedList.splice(insertIdx, 0, draggedPost);
+    const orderedPostIds = newOrderedList.map((p) => p.id);
+
+    handleMovePost(draggedPostId, targetSectionId, insertIdx, orderedPostIds);
+  };
+
+  // 섹션 빈 공간에 메모를 떨어뜨렸을 때 (맨 아래 추가)
+  const handleDropPostOnSection = (draggedPostId, targetSectionId) => {
+    const draggedPost = data?.posts?.find((p) => String(p.id) === String(draggedPostId));
+    if (!draggedPost) return;
+
+    const currentList = (postsBySection[String(targetSectionId)] || []).filter(
+      (p) => String(p.id) !== String(draggedPostId),
+    );
+    const insertIdx = currentList.length;
+    const newOrderedList = [...currentList, draggedPost];
+    const orderedPostIds = newOrderedList.map((p) => p.id);
+
+    handleMovePost(draggedPostId, targetSectionId, insertIdx, orderedPostIds);
+  };
+
+  // 섹션을 드래그하여 다른 섹션 옆으로 이동했을 때 (좌우 순서 변경)
+  const handleDropSection = async (draggedSectionId, targetSectionId, dropPosition) => {
+    if (!admin.isAdmin) {
+      setShowLogin(true);
+      toast('섹션 순서 변경은 관리자 로그인 후 가능합니다.', 'info');
+      return;
+    }
+    if (String(draggedSectionId) === String(targetSectionId)) return;
+
+    const list = [...(data?.sections || [])];
+    const draggedIdx = list.findIndex((s) => String(s.id) === String(draggedSectionId));
+    if (draggedIdx === -1) return;
+    const [draggedSection] = list.splice(draggedIdx, 1);
+
+    const targetIdx = list.findIndex((s) => String(s.id) === String(targetSectionId));
+    if (targetIdx === -1) return;
+    const insertIdx = dropPosition === 'left' ? targetIdx : targetIdx + 1;
+    list.splice(insertIdx, 0, draggedSection);
+
+    const reordered = list.map((s, i) => ({ ...s, order: i }));
+    ++reqSeqRef.current;
+    const backup = data;
+    setData((d) => ({ ...d, sections: reordered }));
+    toast('섹션 순서를 변경했습니다');
+
+    try {
+      await api.reorderSections({ boardId, sectionIds: reordered.map((s) => s.id), password: admin.password });
+    } catch (err) {
+      setData(backup);
+      handleAuthError(err);
     }
   };
 
@@ -299,6 +435,7 @@ export default function BoardPage({ boardId, navigate }) {
     if (promptModal.action === 'edit') {
       const { valid } = await api.verifyPostPassword({ postId: post.id, password });
       if (!valid) throw new Error('비밀번호가 일치하지 않습니다.');
+      setKnownPasswords((prev) => ({ ...prev, [post.id]: password }));
       setConfirmedPassword(password);
       setEditingPost(post);
     } else if (promptModal.action === 'delete') {
@@ -312,6 +449,10 @@ export default function BoardPage({ boardId, navigate }) {
         setData(backup);
         throw err;
       }
+    } else if (promptModal.action === 'move') {
+      const { postId, targetSectionId, newOrder, orderedPostIds } = promptModal.pendingMove;
+      await doMovePost(postId, targetSectionId, newOrder, orderedPostIds, password);
+      setKnownPasswords((prev) => ({ ...prev, [postId]: password }));
     }
   };
 
@@ -440,10 +581,16 @@ export default function BoardPage({ boardId, navigate }) {
             onEditRequest={handleEditRequest}
             onDeleteRequest={handleDeleteRequest}
             onMovePost={handleMovePost}
+            onDropPostOnPost={handleDropPostOnPost}
+            onDropPostOnSection={handleDropPostOnSection}
+            onDropSection={handleDropSection}
             onAddComment={handleAddComment}
             onDeleteComment={handleDeleteComment}
-            onDropPost={handleMovePost}
             onImageClick={setLightbox}
+            onRequireAdmin={(msg) => {
+              setShowLogin(true);
+              if (msg) toast(msg, 'info');
+            }}
           />
         ))}
 
@@ -489,13 +636,27 @@ export default function BoardPage({ boardId, navigate }) {
       {/* 작성자 비밀번호 확인 모달 */}
       <PasswordPromptModal
         open={promptModal.open}
-        onClose={() => setPromptModal({ open: false, post: null, action: 'edit' })}
-        title={promptModal.action === 'edit' ? '✏️ 메모 수정 비밀번호' : '🗑️ 메모 삭제 비밀번호'}
-        actionLabel={promptModal.action === 'edit' ? '수정하기' : '삭제하기'}
+        onClose={() => setPromptModal({ open: false, post: null, action: 'edit', pendingMove: null })}
+        title={
+          promptModal.action === 'edit'
+            ? '✏️ 메모 수정 비밀번호'
+            : promptModal.action === 'delete'
+            ? '🗑️ 메모 삭제 비밀번호'
+            : '↔️ 메모 이동 비밀번호'
+        }
+        actionLabel={
+          promptModal.action === 'edit'
+            ? '수정하기'
+            : promptModal.action === 'delete'
+            ? '삭제하기'
+            : '이동하기'
+        }
         hint={
           promptModal.action === 'edit'
             ? '이 메모를 등록할 때 설정한 비밀번호를 입력해 주세요.'
-            : '이 메모를 등록할 때 설정한 비밀번호를 입력하면 바로 삭제됩니다.'
+            : promptModal.action === 'delete'
+            ? '이 메모를 등록할 때 설정한 비밀번호를 입력하면 바로 삭제됩니다.'
+            : '이 메모를 이동하려면 작성할 때 설정한 비밀번호를 입력해 주세요.'
         }
         onSubmit={handlePromptSubmit}
       />
